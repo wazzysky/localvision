@@ -49,7 +49,6 @@ FrameData g_pending_frame;
 bool g_cam0_ready = false;
 bool g_cam1_ready = false;
 
-// (智能指针的声明，用于黄金关机)
 std::unique_ptr<CameraManager> cm = nullptr;
 std::unique_ptr<CameraConfiguration> config0_ptr = nullptr;
 std::unique_ptr<CameraConfiguration> config1_ptr = nullptr;
@@ -115,8 +114,7 @@ void processing_worker(ThreadSafeQueue<FrameData>& queue) {
         long long wait_time = std::chrono::duration_cast<std::chrono::microseconds>(t_wait_end - t_wait_start).count();
 
         try {
-            // V19.5 关键修复： 移除 cvtColor, 替换为 copyTo
-            // (我们假设 libcamera:RGB888 实际上是 BGR888)
+
             auto t1 = std::chrono::high_resolution_clock::now();
             data.frame0_rgb.copyTo(bgr_frame0);
             auto t2 = std::chrono::high_resolution_clock::now();
@@ -129,7 +127,6 @@ void processing_worker(ThreadSafeQueue<FrameData>& queue) {
 
         cv::Point2f p0 = cv::Point2f(-1,-1), p1 = cv::Point2f(-1,-1);
          try { 
-            // V19.5: bgr_frame0 现在是正确的 BGR 格式了
             auto t4 = std::chrono::high_resolution_clock::now();
             p0 = detect_circle(bgr_frame0); 
             auto t5 = std::chrono::high_resolution_clock::now();
@@ -144,22 +141,6 @@ void processing_worker(ThreadSafeQueue<FrameData>& queue) {
             detect_time_1 = std::chrono::duration_cast<std::chrono::microseconds>(t7 - t6).count();
          }
          catch (const cv::Exception& e) { std::cerr << "[Worker] ERROR: detect_circle (Cam1) failed: " << e.what() << std::endl; }
-
-        // (画方框的代码我们仍然保留，它几乎不耗时，但不会显示)
-        //const int box_radius = 15;
-        //const cv::Scalar color_green(0, 255, 0); 
-        //if (p0.x > 0) {
-        //    cv::rectangle(bgr_frame0, 
-        //                  cv::Point(p0.x - box_radius, p0.y - box_radius), 
-        //                  cv::Point(p0.x + box_radius, p0.y + box_radius), 
-        //                  color_green, 2);
-        //}
-        //if (p1.x > 0) {
-        //    cv::rectangle(bgr_frame1, 
-        //                  cv::Point(p1.x - box_radius, p1.y - box_radius), 
-        //                  cv::Point(p1.x + box_radius, p1.y + box_radius), 
-        //                  color_green, 2);
-        //}
 
         double world_x = NAN, world_y = NAN;
         if (p0.x > 0 && p1.x > 0) {
@@ -190,17 +171,14 @@ void processing_worker(ThreadSafeQueue<FrameData>& queue) {
             sync_error_us = -static_cast<double>(data.timestamp0 - data.timestamp1) / 1000.0;
         }
 
-        // 只有在检测到小球时才打印日志
         if (!std::isnan(world_x)) 
         {
             std::cout << std::fixed << std::setprecision(2);
             
-            // 第 1 行 (状态):
             std::cout << "[Worker] Sync: " << sync_error_us << "us | FPS: " << fps
                       << " | P0: (" << p0.x << "," << p0.y << "), P1: (" << p1.x << "," << p1.y << ") | "
                       << "World: (" << world_x << "," << world_y << ") mm" << std::endl;
             
-            // (SPI 逻辑)
             int x_int = static_cast<int>(world_x * 10); int y_int = static_cast<int>(world_y * 10);
             x_int = std::max(std::min(x_int, 8191), -8191); y_int = std::max(std::min(y_int, 8191), -8191);
             uint8_t x_sign = (x_int < 0) ? 0x40 : 0x00; uint8_t y_sign = (y_int < 0) ? 0x40 : 0x00;
@@ -223,18 +201,11 @@ void processing_worker(ThreadSafeQueue<FrameData>& queue) {
                       << " | SPI: "  << (spi_time / 1000.0) << "ms"
                       << std::endl;
         }
-        // --- 结束 V19.5 修复 (移除了 "else" 块) ---
-        // if (!bgr_frame0.empty()) cv::imshow("Cam0 (BGR)", bgr_frame0);
-        // if (!bgr_frame1.empty()) cv::imshow("Cam1 (BGR)", bgr_frame1);
-        // cv::waitKey(1); 
-
 
         if (processed_count >= 100) { start_time = now; processed_count = 0; }
     }
     spi.close();
     
-    // 注释掉销毁窗口
-    // cv::destroyAllWindows();
     std::cout << "[Worker] Thread finished." << std::endl;
 }
 
@@ -247,7 +218,7 @@ cv::Mat cloneFrame(FrameBuffer *buffer, const Size &size) {
     size_t map_length = expected_length;
     
     if (plane.length < expected_length) {
-         // std::cerr << "[Callback] WARN: Plane length (" << plane.length ...
+         std::cerr << "[Callback] WARN: Plane length (" << plane.length << ") is less than expected (" << expected_length << ")" << std::endl;
     }
     
     void *data_ptr = mmap(NULL, map_length, PROT_READ, MAP_SHARED, plane.fd.get(), 0);
@@ -255,7 +226,7 @@ cv::Mat cloneFrame(FrameBuffer *buffer, const Size &size) {
         std::cerr << "[Callback] ERROR: mmap failed! Error: " << strerror(errno) << std::endl; return cv::Mat();
     }
     
-    cv::Mat rgb_mat; // (这个变量名现在有误导性，它实际上是 BGR)
+    cv::Mat rgb_mat; 
     cv::Mat cloned_frame;
     try {
         rgb_mat = cv::Mat(size.height, size.width, CV_8UC3, data_ptr);
@@ -336,10 +307,8 @@ void requestComplete1(Request *request) {
 }
 
 
-// --- Main Function (V19.5: Viewfinder + FrameDurationLimits) ---
+// --- Main Function---
 int main() {
-    // *** 我们不再设置 .yaml 环境变量 ***
-
     signal(SIGINT, signal_handler); signal(SIGTERM, signal_handler);
     cm = std::make_unique<CameraManager>(); cm->start();
     if (cm->cameras().size() < 2) {
@@ -354,12 +323,11 @@ int main() {
     if (camera1->acquire()) { std::cerr << "Failed to acquire camera 1" << std::endl; camera0->release(); cm->stop(); return -1; }
     std::cout << ">>> Camera 1 acquired." << std::endl;
 
-    // --- V19.5: Viewfinder + RGB888 ---
     std::cout << ">>> Requesting Viewfinder stream role for Cam0..." << std::endl;
     config0_ptr = camera0->generateConfiguration({ StreamRole::Viewfinder }); 
     if (!config0_ptr) { std::cerr << "Failed to generate config 0" << std::endl; /* ... */ }
     g_config0 = config0_ptr.get();
-    g_config0->at(0).pixelFormat = formats::RGB888; // [0] 是 Viewfinder 流
+    g_config0->at(0).pixelFormat = formats::RGB888; // Viewfinder 流
     g_config0->at(0).size = Size(640, 480);
     if (camera0->configure(g_config0) < 0) {
         std::cerr << "Failed to configure camera 0." << std::endl; camera0->release(); camera1->release(); cm->stop(); return -1;
@@ -370,13 +338,13 @@ int main() {
     config1_ptr = camera1->generateConfiguration({ StreamRole::Viewfinder }); 
     if (!config1_ptr) { std::cerr << "Failed to generate config 1" << std::endl; /* ... */ }
     g_config1 = config1_ptr.get();
-    g_config1->at(0).pixelFormat = formats::RGB888; // [0] 是 Viewfinder 流
+    g_config1->at(0).pixelFormat = formats::RGB888; // Viewfinder 流
     g_config1->at(0).size = Size(640, 480);
     if (camera1->configure(g_config1) < 0) {
         std::cerr << "Failed to configure camera 1." << std::endl; camera0->release(); camera1->release(); cm->stop(); return -1;
     }
     std::cout << ">>> Camera 1 configured: " << g_config1->at(0).pixelFormat.toString() << " " << g_config1->at(0).size.toString() << std::endl;
-    // --- 结束 ---
+
 
     // (分配 camera0)
     allocator0_ptr = std::make_unique<FrameBufferAllocator>(camera0);
@@ -414,7 +382,6 @@ int main() {
     camera1->requestCompleted.connect(requestComplete1);
     std::cout << ">>> Signals connected." << std::endl;
 
-    // --- V19.5: 保持 V19 的 60 FPS ControlList 修复 ---
     int64_t frame_duration = 16666; // 60 FPS
     static std::array<int64_t, 2> duration_limits = { frame_duration, frame_duration };
 
@@ -429,15 +396,14 @@ int main() {
     controls1.set(controls::AeEnable, true); 
     
     std::cout << ">>> Starting cameras (Master/Slave, 60 FPS, Constrained AE)..." << std::endl;
-    // --- 结束 V19.5 修复 ---
 
-    // 必须先启动从机 (Client)
+    // 先启动从机
     if (camera1->start(&controls1) < 0) { std::cerr << "Failed to start camera 1 (Client)" << std::endl; /* ... */ }
     std::cout << ">>> Camera 1 (Client) started." << std::endl;
     
     std::this_thread::sleep_for(500ms); 
 
-    // 再启动主机 (Server)
+    // 再启动主机 
     if (camera0->start(&controls0) < 0) { std::cerr << "Failed to start camera 0 (Server)" << std::endl; /* ... */ }
      std::cout << ">>> Camera 0 (Server) started." << std::endl;
 
@@ -453,7 +419,6 @@ int main() {
         while (!stop_flag) { std::this_thread::sleep_for(100ms); }
     }
     
-    // --- 最终的“黄金”关机顺序 ---
     std::cout << ">>> Stop signal received. Initiating shutdown..." << std::endl;
     if (camera0) { camera0->stop(); std::cout << ">>> Camera 0 stopped." << std::endl; }
     if (camera1) { camera1->stop(); std::cout << ">>> Camera 1 stopped." << std::endl; }
@@ -467,7 +432,6 @@ int main() {
         std::cout << ">>> Worker thread joined." << std::endl; 
     }
 
-    // 步骤 1: 释放缓冲区
     if (g_allocator0 && g_config0) { 
         std::cout << ">>> Freeing buffers 0..." << std::endl; 
         g_allocator0->free(g_config0->at(0).stream()); // RGB 流
@@ -479,12 +443,10 @@ int main() {
         std::cout << ">>> Buffers 1 freed." << std::endl; 
     }
     
-    // 步骤 2: 销毁请求
     std::cout << ">>> Clearing requests..." << std::endl;
     g_requests0.clear(); 
     g_requests1.clear();
     
-    // 步骤 3: 释放相机硬件
     if (camera0) { 
         std::cout << ">>> Releasing camera 0..." << std::endl; 
         camera0->release(); 
@@ -496,7 +458,6 @@ int main() {
         std::cout << ">>> Camera 1 released." << std::endl; 
     }
     
-    // 步骤 4: 销毁所有 libcamera *对象*
     std::cout << ">>> Destroying libcamera objects..." << std::endl;
     camera0.reset(); 
     camera1.reset();
@@ -505,12 +466,10 @@ int main() {
     config0_ptr.reset();    
     config1_ptr.reset();    
     
-    // 步骤 5: 重置所有全局裸指针
     g_allocator0 = nullptr; g_allocator1 = nullptr;
     g_config0 = nullptr; g_config1 = nullptr;
     g_data_queue = nullptr;
 
-    // 步骤 6: 安全地停止和销毁 CameraManager
     if (cm) { 
         std::cout << ">>> Stopping CameraManager..." << std::endl; 
         cm->stop(); 
